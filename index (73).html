@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Policy Intake</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { margin: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback } = React;
+
+
+// ---------- Design tokens ----------
+// paper cream bg, ink navy text, wax-seal amber accent, muted slate, coral for missing/required
+const COLORS = {
+  paper: "#F6F2E9",
+  paperDeep: "#EFE8D8",
+  ink: "#1E2A38",
+  inkSoft: "#3B4A5A",
+  slate: "#6B7280",
+  amber: "#B6842F",
+  amberDeep: "#8F6423",
+  coral: "#C1443C",
+  green: "#2F6F4F",
+  line: "#DCD3BE",
+};
+
+const FIELD_GROUPS = [
+  {
+    title: "Policyholder",
+    fields: [
+      { key: "insuredName", label: "Name of insured" },
+      { key: "address", label: "Address" },
+      { key: "email", label: "Email address" },
+      { key: "mobileNumber", label: "Mobile number", required: true },
+    ],
+  },
+  {
+    title: "Policy",
+    fields: [
+      { key: "insuranceCompanyName", label: "Insurance company" },
+      { key: "insuranceType", label: "Insurance type (TP / Comp / SAOD)" },
+      { key: "policyNumber", label: "Policy number" },
+      { key: "policyIssuedOn", label: "Issued on" },
+      { key: "periodFrom", label: "Cover start" },
+      { key: "periodTo", label: "Cover end" },
+      { key: "premiumAmount", label: "Premium payable (₹)" },
+      { key: "traineeName", label: "Trainee Name / Bunk Name" },
+    ],
+  },
+  {
+    title: "Vehicle",
+    fields: [
+      { key: "vehicleType", label: "Vehicle type (TW / Car)" },
+      { key: "vehicleRegistrationNo", label: "Registration no." },
+      { key: "vehicleMakeModel", label: "Make / model" },
+      { key: "engineNo", label: "Engine no." },
+      { key: "chassisNo", label: "Chassis no." },
+      { key: "idv", label: "IDV (Insured Declared Value)" },
+    ],
+  },
+];
+
+const ALL_KEYS = FIELD_GROUPS.flatMap((g) => g.fields.map((f) => f.key));
+
+function emptyFields() {
+  const o = {};
+  ALL_KEYS.forEach((k) => (o[k] = ""));
+  return o;
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result.split(",")[1]);
+    r.onerror = () => reject(new Error("Could not read file"));
+    r.readAsDataURL(file);
+  });
+}
+
+async function extractFields(base64, mediaType) {
+  const isPdf = mediaType === "application/pdf";
+  const docBlock = isPdf
+    ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } }
+    : { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } };
+
+  const prompt = `Extract these fields from the attached insurance document and return ONLY a raw JSON object, no markdown fences, no commentary. Use "" for any field that is not present in the document.
+Keys: ${ALL_KEYS.join(", ")}
+- periodFrom / periodTo: the insurance cover start and end dates.
+- mobileNumber: the policyholder's mobile number, if printed anywhere in the document.
+- idv: the Insured Declared Value (IDV) of the vehicle, if stated.
+- traineeName: the trainee name or bunk/branch name associated with the policy, if printed (may appear as "Trainee Name", "Bunk Name", agent/branch fields, etc).
+- insuranceCompanyName: the name of the insurer/insurance company issuing the policy.
+- insuranceType: the type of cover — e.g. "TP" (Third Party / Liability Only), "Comprehensive" / "Comp", or "SAOD" (Stand-Alone Own Damage). Infer from the policy title or coverage sections if not stated explicitly as an abbreviation.
+- vehicleType: the category of vehicle — e.g. "TW" (Two Wheeler), "Car", "Commercial Vehicle", etc. Infer from the vehicle/policy type described in the document.
+Return strictly valid JSON with exactly these keys.`;
+
+  const WORKER_URL = "https://vibedoc-proxy.policyassistvibe.workers.dev";
+
+  const response = await fetch(WORKER_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1000,
+      messages: [{ role: "user", content: [docBlock, { type: "text", text: prompt }] }],
+    }),
+  });
+
+  if (!response.ok) throw new Error("Extraction request failed");
+  const data = await response.json();
+  const textBlock = (data.content || []).find((b) => b.type === "text");
+  if (!textBlock) throw new Error("No response from extraction");
+  const cleaned = textBlock.text.replace(/```json|```/g, "").trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    throw new Error("Could not parse extracted data");
+  }
+  const merged = emptyFields();
+  ALL_KEYS.forEach((k) => {
+    if (parsed[k] && String(parsed[k]).trim() && String(parsed[k]).trim() !== "-") {
+      merged[k] = String(parsed[k]).trim();
+    }
+  });
+  return merged;
+}
+
+// ---------- Small building blocks ----------
+
+function Stamp({ label }) {
+  return (
+    <div
+      style={{
+        border: `2px solid ${COLORS.green}`,
+        color: COLORS.green,
+        transform: "rotate(-6deg)",
+        borderRadius: "9999px",
+      }}
+      className="inline-flex items-center px-4 py-1 text-xs font-bold tracking-widest uppercase select-none"
+    >
+      {label}
+    </div>
+  );
+}
+
+function StepDots({ step }) {
+  const steps = ["Upload", "Review", "Done"];
+  return (
+    <div className="flex items-center gap-2 mb-8">
+      {steps.map((s, i) => {
+        const active = i === step;
+        const done = i < step;
+        return (
+          <React.Fragment key={s}>
+            <div className="flex items-center gap-2">
+              <div
+                className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0"
+                style={{
+                  background: done ? COLORS.green : active ? COLORS.amber : "transparent",
+                  color: done || active ? "#fff" : COLORS.slate,
+                  border: `1.5px solid ${done ? COLORS.green : active ? COLORS.amber : COLORS.line}`,
+                }}
+              >
+                {done ? "✓" : i + 1}
+              </div>
+              <span
+                className="text-sm font-medium"
+                style={{ color: active ? COLORS.ink : COLORS.slate }}
+              >
+                {s}
+              </span>
+            </div>
+            {i < steps.length - 1 && (
+              <div className="w-8 h-px" style={{ background: COLORS.line }} />
+            )}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+function Field({ field, value, onChange, missing }) {
+  const isMissing = field.required && !value;
+  return (
+    <label className="block mb-4">
+      <span
+        className="block text-xs font-semibold uppercase tracking-wide mb-1"
+        style={{ color: isMissing ? COLORS.coral : COLORS.slate }}
+      >
+        {field.label}
+        {field.required && <span style={{ color: COLORS.coral }}> *</span>}
+        {!field.required && !value && <span className="ml-1 font-normal normal-case">(not found)</span>}
+      </span>
+      <input
+        value={value}
+        onChange={(e) => onChange(field.key, e.target.value)}
+        placeholder={isMissing ? "Required — not found in document" : ""}
+        className="w-full px-3 py-2 rounded-md text-sm outline-none transition-colors"
+        style={{
+          background: "#fff",
+          border: `1.5px solid ${isMissing ? COLORS.coral : COLORS.line}`,
+          color: COLORS.ink,
+        }}
+      />
+    </label>
+  );
+}
+
+// ---------- Main App ----------
+
+function App() {
+  const [role, setRole] = useState(null); // 'user' | 'admin'
+  const [step, setStep] = useState(0); // 0 upload, 1 review, 2 done
+  const [fileName, setFileName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [fields, setFields] = useState(emptyFields());
+
+  // admin state
+  const [submissions, setSubmissions] = useState([]);
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [selected, setSelected] = useState(null);
+
+  const resetUserFlow = () => {
+    setStep(0);
+    setFileName("");
+    setFields(emptyFields());
+    setError("");
+    setBusy(false);
+  };
+
+  const handleFile = useCallback(async (file) => {
+    if (!file) return;
+    setError("");
+    setFileName(file.name);
+    setBusy(true);
+    try {
+      const base64 = await fileToBase64(file);
+      const mediaType = file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "image/jpeg");
+      const extracted = await extractFields(base64, mediaType);
+      setFields(extracted);
+      setStep(1);
+    } catch (e) {
+      setError(e.message || "Something went wrong while reading the document.");
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const updateField = (key, value) => setFields((f) => ({ ...f, [key]: value }));
+
+  const canSubmit = fields.mobileNumber && fields.mobileNumber.trim().length >= 7;
+
+  const submit = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const id = `submission:${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const record = {
+        id,
+        fileName,
+        fields,
+        submittedAt: new Date().toISOString(),
+      };
+      const result = await window.storage.set(id, JSON.stringify(record), true);
+      if (!result) throw new Error("Could not save submission.");
+      setStep(2);
+    } catch (e) {
+      setError(e.message || "Could not submit. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const loadSubmissions = useCallback(async () => {
+    setAdminLoading(true);
+    try {
+      const listResult = await window.storage.list("submission:", true);
+      const keys = listResult?.keys || [];
+      const records = [];
+      for (const k of keys) {
+        try {
+          const r = await window.storage.get(k, true);
+          if (r?.value) records.push(JSON.parse(r.value));
+        } catch {
+          // skip unreadable entries
+        }
+      }
+      records.sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
+      setSubmissions(records);
+    } catch {
+      setSubmissions([]);
+    } finally {
+      setAdminLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (role === "admin") loadSubmissions();
+  }, [role, loadSubmissions]);
+
+  // ---------- Shell ----------
+  return (
+    <div
+      className="min-h-screen w-full"
+      style={{ background: COLORS.paper, fontFamily: "'Georgia','Iowan Old Style',serif" }}
+    >
+      <header
+        className="px-6 py-4 flex items-center justify-between"
+        style={{ borderBottom: `1px solid ${COLORS.line}` }}
+      >
+        <div className="flex items-baseline gap-2">
+          <span className="text-xl font-bold" style={{ color: COLORS.ink }}>
+            Docket
+          </span>
+          <span
+            className="text-xs uppercase tracking-widest"
+            style={{ color: COLORS.amber, fontFamily: "system-ui, sans-serif" }}
+          >
+            document intake
+          </span>
+        </div>
+        {role && (
+          <button
+            onClick={() => {
+              setRole(null);
+              resetUserFlow();
+              setSelected(null);
+            }}
+            className="text-xs px-3 py-1.5 rounded-full font-medium"
+            style={{
+              color: COLORS.inkSoft,
+              border: `1px solid ${COLORS.line}`,
+              fontFamily: "system-ui, sans-serif",
+            }}
+          >
+            {role === "user" ? "Signed in as User" : "Signed in as Admin"} · Switch
+          </button>
+        )}
+      </header>
+
+      <main className="max-w-2xl mx-auto px-6 py-10" style={{ fontFamily: "system-ui, sans-serif" }}>
+        {!role && <RoleSelect onSelect={setRole} />}
+
+        {role === "user" && step === 0 && (
+          <UploadScreen busy={busy} error={error} onFile={handleFile} />
+        )}
+
+        {role === "user" && step === 1 && (
+          <ReviewScreen
+            fileName={fileName}
+            fields={fields}
+            updateField={updateField}
+            canSubmit={canSubmit}
+            busy={busy}
+            error={error}
+            onSubmit={submit}
+            onStartOver={resetUserFlow}
+          />
+        )}
+
+        {role === "user" && step === 2 && <SuccessScreen onAnother={resetUserFlow} />}
+
+        {role === "admin" && (
+          <AdminScreen
+            loading={adminLoading}
+            submissions={submissions}
+            onRefresh={loadSubmissions}
+            selected={selected}
+            setSelected={setSelected}
+          />
+        )}
+      </main>
+    </div>
+  );
+}
+
+function RoleSelect({ onSelect }) {
+  return (
+    <div className="text-center py-10" style={{ fontFamily: "system-ui, sans-serif" }}>
+      <h1
+        className="text-3xl mb-2"
+        style={{ color: COLORS.ink, fontFamily: "'Georgia',serif", fontWeight: 700 }}
+      >
+        Welcome to Docket
+      </h1>
+      <p className="text-sm mb-10" style={{ color: COLORS.slate }}>
+        Upload a document, we'll pull out the details. Choose how you're signing in.
+      </p>
+      <div className="flex gap-4 justify-center flex-wrap">
+        <button
+          onClick={() => onSelect("user")}
+          className="px-8 py-5 rounded-xl text-left w-56 transition-transform hover:-translate-y-0.5"
+          style={{ background: "#fff", border: `1.5px solid ${COLORS.line}` }}
+        >
+          <div className="text-sm font-semibold mb-1" style={{ color: COLORS.ink }}>
+            Continue as User
+          </div>
+          <div className="text-xs" style={{ color: COLORS.slate }}>
+            Upload and submit a document
+          </div>
+        </button>
+        <button
+          onClick={() => onSelect("admin")}
+          className="px-8 py-5 rounded-xl text-left w-56 transition-transform hover:-translate-y-0.5"
+          style={{ background: COLORS.ink, border: `1.5px solid ${COLORS.ink}` }}
+        >
+          <div className="text-sm font-semibold mb-1" style={{ color: "#fff" }}>
+            Continue as Admin
+          </div>
+          <div className="text-xs" style={{ color: "#C9D2DB" }}>
+            Review submitted documents
+          </div>
+        </button>
+      </div>
+      <p className="text-[11px] mt-8" style={{ color: COLORS.slate }}>
+        Demo login — no password required.
+      </p>
+    </div>
+  );
+}
+
+function UploadScreen({ busy, error, onFile }) {
+  const [dragOver, setDragOver] = useState(false);
+  return (
+    <div>
+      <StepDots step={0} />
+      <h2 className="text-2xl mb-1" style={{ color: COLORS.ink, fontFamily: "'Georgia',serif", fontWeight: 700 }}>
+        Upload your document
+      </h2>
+      <p className="text-sm mb-6" style={{ color: COLORS.slate }}>
+        PDF or photo of your policy document. We'll read the details automatically.
+      </p>
+
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          const f = e.dataTransfer.files?.[0];
+          if (f) onFile(f);
+        }}
+        className="rounded-xl"
+        style={{
+          border: `2px dashed ${dragOver ? COLORS.amber : COLORS.line}`,
+          background: dragOver ? COLORS.paperDeep : "#fff",
+        }}
+      >
+        <label htmlFor="doc-upload-input" className="block py-16 text-center cursor-pointer">
+          {busy ? (
+            <>
+              <div
+                className="w-8 h-8 mx-auto mb-4 rounded-full animate-spin"
+                style={{ border: `3px solid ${COLORS.line}`, borderTopColor: COLORS.amber }}
+              />
+              <div className="text-sm font-medium" style={{ color: COLORS.ink }}>
+                Reading your document…
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="text-3xl mb-3">📄</div>
+              <div className="text-sm font-medium mb-1" style={{ color: COLORS.ink }}>
+                Drop your file here, or click to browse
+              </div>
+              <div className="text-xs" style={{ color: COLORS.slate }}>
+                PDF, JPG, or PNG
+              </div>
+            </>
+          )}
+        </label>
+      </div>
+      <input
+        id="doc-upload-input"
+        type="file"
+        accept=".pdf,image/*"
+        className="sr-only"
+        disabled={busy}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) onFile(f);
+          e.target.value = "";
+        }}
+      />
+
+      {error && (
+        <div
+          className="mt-4 text-sm px-4 py-3 rounded-md"
+          style={{ background: "#FBEAE8", color: COLORS.coral, border: `1px solid ${COLORS.coral}` }}
+        >
+          {error} Please try again.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReviewScreen({ fileName, fields, updateField, canSubmit, busy, error, onSubmit, onStartOver }) {
+  return (
+    <div>
+      <StepDots step={1} />
+      <h2 className="text-2xl mb-1" style={{ color: COLORS.ink, fontFamily: "'Georgia',serif", fontWeight: 700 }}>
+        Check the details
+      </h2>
+      <p className="text-sm mb-1" style={{ color: COLORS.slate }}>
+        Pulled from <span style={{ color: COLORS.ink, fontWeight: 600 }}>{fileName}</span>. Fix anything that's wrong, and fill in what's missing.
+      </p>
+
+      <div className="mt-6 space-y-6">
+        {FIELD_GROUPS.map((group) => (
+          <div key={group.title} className="rounded-xl p-5" style={{ background: "#fff", border: `1.5px solid ${COLORS.line}` }}>
+            <div
+              className="text-xs font-bold uppercase tracking-widest mb-4"
+              style={{ color: COLORS.amberDeep }}
+            >
+              {group.title}
+            </div>
+            {group.fields.map((f) => (
+              <Field key={f.key} field={f} value={fields[f.key]} onChange={updateField} />
+            ))}
+          </div>
+        ))}
+      </div>
+
+      {error && (
+        <div
+          className="mt-4 text-sm px-4 py-3 rounded-md"
+          style={{ background: "#FBEAE8", color: COLORS.coral, border: `1px solid ${COLORS.coral}` }}
+        >
+          {error}
+        </div>
+      )}
+
+      <div className="flex items-center gap-3 mt-6">
+        <button
+          onClick={onSubmit}
+          disabled={!canSubmit || busy}
+          className="px-6 py-2.5 rounded-lg text-sm font-semibold transition-opacity"
+          style={{
+            background: canSubmit ? COLORS.ink : COLORS.line,
+            color: canSubmit ? "#fff" : COLORS.slate,
+            cursor: canSubmit && !busy ? "pointer" : "not-allowed",
+            opacity: busy ? 0.6 : 1,
+          }}
+        >
+          {busy ? "Submitting…" : "Submit"}
+        </button>
+        <button onClick={onStartOver} className="text-sm font-medium" style={{ color: COLORS.slate }}>
+          Start over
+        </button>
+        {!canSubmit && (
+          <span className="text-xs" style={{ color: COLORS.coral }}>
+            Mobile number is required before you can submit.
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SuccessScreen({ onAnother }) {
+  return (
+    <div className="text-center py-14">
+      <Stamp label="Received" />
+      <h2
+        className="text-2xl mt-6 mb-2"
+        style={{ color: COLORS.ink, fontFamily: "'Georgia',serif", fontWeight: 700 }}
+      >
+        Submitted successfully
+      </h2>
+      <p className="text-sm max-w-sm mx-auto" style={{ color: COLORS.slate }}>
+        Your document has been submitted for review. You don't need to do anything else.
+      </p>
+      <button
+        onClick={onAnother}
+        className="mt-8 px-6 py-2.5 rounded-lg text-sm font-semibold"
+        style={{ background: COLORS.ink, color: "#fff" }}
+      >
+        Submit another document
+      </button>
+    </div>
+  );
+}
+
+function AdminScreen({ loading, submissions, onRefresh, selected, setSelected }) {
+  if (selected) {
+    return <SubmissionDetail record={selected} onBack={() => setSelected(null)} />;
+  }
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h2 className="text-2xl mb-1" style={{ color: COLORS.ink, fontFamily: "'Georgia',serif", fontWeight: 700 }}>
+            Submitted documents
+          </h2>
+          <p className="text-sm" style={{ color: COLORS.slate }}>
+            {submissions.length} submission{submissions.length === 1 ? "" : "s"}
+          </p>
+        </div>
+        <button
+          onClick={onRefresh}
+          className="text-xs px-3 py-1.5 rounded-full font-medium"
+          style={{ border: `1px solid ${COLORS.line}`, color: COLORS.inkSoft }}
+        >
+          Refresh
+        </button>
+      </div>
+
+      {loading && (
+        <div className="text-sm" style={{ color: COLORS.slate }}>
+          Loading…
+        </div>
+      )}
+
+      {!loading && submissions.length === 0 && (
+        <div
+          className="rounded-xl py-14 text-center"
+          style={{ background: "#fff", border: `1.5px dashed ${COLORS.line}` }}
+        >
+          <div className="text-sm" style={{ color: COLORS.slate }}>
+            No documents have been submitted yet.
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {submissions.map((r) => (
+          <button
+            key={r.id}
+            onClick={() => setSelected(r)}
+            className="w-full text-left rounded-xl px-5 py-4 flex items-center justify-between transition-transform hover:-translate-y-0.5"
+            style={{ background: "#fff", border: `1.5px solid ${COLORS.line}`, borderLeft: `4px solid ${COLORS.amber}` }}
+          >
+            <div>
+              <div className="text-sm font-semibold" style={{ color: COLORS.ink }}>
+                {r.fields.insuredName || "Unnamed submission"}
+              </div>
+              <div className="text-xs mt-0.5" style={{ color: COLORS.slate }}>
+                {r.fields.policyNumber || r.fileName} · {r.fields.mobileNumber || "no mobile on file"}
+              </div>
+            </div>
+            <div className="text-xs" style={{ color: COLORS.slate }}>
+              {new Date(r.submittedAt).toLocaleDateString()}
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SubmissionDetail({ record, onBack }) {
+  return (
+    <div>
+      <button
+        onClick={onBack}
+        className="text-sm font-medium mb-6"
+        style={{ color: COLORS.slate }}
+      >
+        ← Back to all submissions
+      </button>
+
+      <div className="rounded-xl overflow-hidden" style={{ background: "#fff", border: `1.5px solid ${COLORS.line}` }}>
+        <div className="px-6 py-5" style={{ background: COLORS.ink }}>
+          <div className="text-xs uppercase tracking-widest" style={{ color: "#C9D2DB" }}>
+            {record.fileName}
+          </div>
+          <div className="text-xl font-bold mt-1" style={{ color: "#fff", fontFamily: "'Georgia',serif" }}>
+            {record.fields.insuredName || "Unnamed submission"}
+          </div>
+          <div className="text-xs mt-1" style={{ color: "#C9D2DB" }}>
+            Submitted {new Date(record.submittedAt).toLocaleString()}
+          </div>
+        </div>
+
+        <div
+          className="px-6 py-3 flex items-center gap-2"
+          style={{ borderBottom: `1px dashed ${COLORS.line}` }}
+        >
+          {Array.from({ length: 16 }).map((_, i) => (
+            <div key={i} className="w-1.5 h-1.5 rounded-full" style={{ background: COLORS.paperDeep }} />
+          ))}
+        </div>
+
+        <div className="p-6 space-y-6">
+          {FIELD_GROUPS.map((group) => (
+            <div key={group.title}>
+              <div className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: COLORS.amberDeep }}>
+                {group.title}
+              </div>
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
+                {group.fields.map((f) => (
+                  <div key={f.key}>
+                    <dt className="text-[11px] uppercase tracking-wide" style={{ color: COLORS.slate }}>
+                      {f.label}
+                    </dt>
+                    <dd className="text-sm" style={{ color: record.fields[f.key] ? COLORS.ink : COLORS.coral }}>
+                      {record.fields[f.key] || "Not provided"}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
