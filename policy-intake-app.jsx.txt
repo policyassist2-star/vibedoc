@@ -85,7 +85,10 @@ Keys: ${ALL_KEYS.join(", ")}
 - vehicleType: the category of vehicle — e.g. "TW" (Two Wheeler), "Car", "Commercial Vehicle", etc. Infer from the vehicle/policy type described in the document.
 Return strictly valid JSON with exactly these keys.`;
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  // Replace with your deployed Cloudflare Worker URL
+  const WORKER_URL = "https://vibedoc-proxy.YOUR-SUBDOMAIN.workers.dev";
+
+  const response = await fetch(WORKER_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
